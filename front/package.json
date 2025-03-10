@@ -1,0 +1,25 @@
+{
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"serve": "vite preview"
+	},
+	"dependencies": {
+		"@floating-ui/dom": "^1.6.13",
+		"@sqlite.org/sqlite-wasm": "^3.49.1-build2",
+		"solid-js": "^1.9.5",
+		"ulid": "^2.3.0"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "^4.0.10",
+		"@trivago/prettier-plugin-sort-imports": "^5.2.2",
+		"prettier-plugin-tailwindcss": "^0.6.11",
+		"tailwindcss": "^4.0.10",
+		"typescript": "^5.8.2",
+		"valibot": "^1.0.0-rc.3",
+		"vite": "^6.0.0",
+		"vite-plugin-pwa": "^0.21.1",
+		"vite-plugin-solid": "^2.11.6"
+	}
+}
