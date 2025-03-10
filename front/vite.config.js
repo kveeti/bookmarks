@@ -15,6 +15,33 @@ export default defineConfig({
 			devOptions: {
 				enabled: true,
 			},
+			workbox: {
+				sourcemap: false,
+				cleanupOutdatedCaches: true,
+				runtimeCaching: [
+					{
+						urlPattern: /\/assets\/.*\.(?:js|css|ttf?)$/,
+						handler: "CacheFirst",
+						options: {
+							cacheName: "cache-assets",
+							expiration: {
+								maxEntries: 50,
+								maxAgeSeconds: 7 * 24 * 60 * 60,
+							},
+						},
+					},
+					{
+						urlPattern: /^\/index\.html$/,
+						handler: "NetworkFirst",
+						options: {
+							cacheName: "cache-index-html",
+							expiration: {
+								maxEntries: 1,
+							},
+						},
+					},
+				],
+			},
 		}),
 	],
 	build: {
