@@ -15,7 +15,87 @@ const updateSW = registerSW({
 	onOfflineReady() {},
 });
 
+const BACK_URL = import.meta.env.VITE_BACK_URL;
+
+type Message = {
+	id: string;
+	client_id: string;
+	title: string;
+	url: string;
+	deleted_at: string;
+	updated_at: string;
+	created_at: string;
+};
+
+function subSse() {
+	const eventSource = new EventSource(BACK_URL + "/api/events");
+
+	eventSource.onmessage = async (e) => {
+		try {
+			const parsedData = JSON.parse(e.data) as Message;
+			console.log("new msg!", parsedData);
+
+			await db.exec(
+				`
+insert into bookmarks (id, client_id, title, url, deleted_at, updated_at, created_at)
+values (?, ?, ?, ?, ?, ?, ?)
+on conflict(id)
+do update set
+	title = ?,
+	url = ?,
+	deleted_at = ?,
+	updated_at = ?;
+`,
+				[
+					parsedData.id,
+					parsedData.client_id,
+					parsedData.title,
+					parsedData.url,
+					parsedData.deleted_at,
+					parsedData.updated_at,
+					parsedData.created_at,
+					parsedData.title,
+					parsedData.url,
+					parsedData.deleted_at,
+					parsedData.updated_at,
+				]
+			);
+		} catch (error) {
+			console.error("invalid sse data", error);
+		}
+	};
+}
+
+const LAST_SYNC = "last_sync";
+
+async function sync() {
+	let lastSyncedAt = localStorage.getItem(LAST_SYNC) || 0;
+	lastSyncedAt = new Date(lastSyncedAt);
+	console.log({ lastSyncedAt });
+
+	const updated = await db.query(
+		`
+select * from bookmarks
+where updated_at > ?;
+`,
+		[lastSyncedAt.toISOString()]
+	);
+
+	if (!updated.length) return;
+
+	const res = await fetch(BACK_URL + "/api/sync", {
+		method: "POST",
+		body: JSON.stringify(updated),
+		headers: { "Content-Type": "application/json" },
+	});
+	if (!res.ok) return;
+	localStorage.setItem(LAST_SYNC, new Date().toISOString());
+}
+
 export function Entry() {
+	sync();
+	subSse();
+
 	return (
 		<div class="mx-auto mt-[40vh] max-w-sm space-y-4 p-4">
 			{showUpdate() && (
@@ -34,6 +114,13 @@ export function Entry() {
 			{import.meta.env.DEV && <DbReset />}
 		</div>
 	);
+}
+
+async function deleteBookmark(id: string) {
+	await db.exec("update bookmarks set deleted_at = ? where id = ?", [
+		new Date().toISOString(),
+		id,
+	]);
 }
 
 function Input() {
@@ -109,26 +196,31 @@ function Input() {
 				initialValue={inputVal()}
 				isOpen={isNewBookmarkOpen()}
 				onOpenChange={(value) => setIsNewBookmarkOpen(value)}
-				onSuccess={() => refetch()}
+				onSuccess={() => {
+					sync();
+					refetch();
+				}}
 			/>
 
 			<EditBookmark
 				bookmark={state.intent === "edit" && state.bookmark ? state.bookmark : null}
 				onOpenChange={() => setState({})}
-				onSuccess={() => refetch()}
+				onSuccess={() => {
+					sync();
+					refetch();
+				}}
 			/>
 
 			<DeleteBookmark
 				bookmark={state.intent === "delete" && state.bookmark ? state.bookmark : null}
 				onOpenChange={() => setState({})}
-				onSuccess={() => refetch()}
+				onSuccess={() => {
+					sync();
+					refetch();
+				}}
 			/>
 		</>
 	);
-}
-
-async function deleteBookmark(id: string) {
-	await db.query("delete from bookmarks where id = ?", [id]);
 }
 
 const formSchema = v.object({
@@ -162,11 +254,11 @@ function NewBookmark(props: {
 		const data = Object.fromEntries(new FormData(t));
 		if (!v.is(formSchema, data)) return;
 
-		await db.exec("insert into bookmarks (id, title, url) values (?, ?, ?)", [
-			id(),
-			data.title,
-			data.url,
-		]);
+		const now = new Date().toISOString();
+		await db.exec(
+			"insert into bookmarks (id, client_id, title, url, created_at, updated_at) values (?, ?, ?, ?, ?, ?)",
+			[id(), id(), data.title, data.url, now, now]
+		);
 		t.reset();
 		props.onSuccess();
 		dialog.close();

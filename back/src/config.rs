@@ -5,7 +5,6 @@ use once_cell::sync::Lazy;
 #[derive(Clone, serde::Deserialize)]
 pub struct Config {
     pub database_url: String,
-    pub secret: String,
     pub front_url: String,
 }
 

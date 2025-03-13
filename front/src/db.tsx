@@ -64,7 +64,7 @@ export function sqlite(migrations: (db) => Promise<void>) {
 				console.log("sqlite version", configResponse.result.version.libVersion);
 
 				const openResponse = await promiser("open", {
-					filename: "file:data.sqlite3?vfs=opfs",
+					filename: "file:db?vfs=opfs",
 				});
 				dbId = openResponse.dbId;
 				console.log(
@@ -100,8 +100,12 @@ export const db = sqlite(async (exec) => {
 	await exec(`
 create table if not exists bookmarks (
 	id text primary key not null,
-	title text,
-	url text
+	client_id text not null,
+	title text not null,
+	url text not null,
+	updated_at text not null,
+	created_at text not null,
+	deleted_at text
 );`);
 });
 
@@ -113,6 +117,8 @@ export type Bookmark = {
 	id: string;
 	title: string;
 	url: string;
+	created_at: string;
+	updated_at: string;
 };
 
 export function DbReset() {
