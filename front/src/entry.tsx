@@ -6,7 +6,19 @@ import { registerSW } from "virtual:pwa-register";
 import { Bookmark, DbReset, db, id } from "./db";
 import { TheInput } from "./the-input";
 
+const BACK_URL = import.meta.env.VITE_BACK_URL;
+
 const [showUpdate, setShowUpdate] = createSignal(false);
+const [user, { refetch: refetchUser }] = usePromise<{ id: string; username: string } | null>(
+	async () => {
+		const res = await fetch(BACK_URL + "/api/me", {
+			method: "GET",
+			credentials: "include",
+		});
+		if (!res.ok) return null;
+		return res.json();
+	}
+);
 
 const updateSW = registerSW({
 	onNeedRefresh() {
@@ -14,8 +26,6 @@ const updateSW = registerSW({
 	},
 	onOfflineReady() {},
 });
-
-const BACK_URL = import.meta.env.VITE_BACK_URL;
 
 type Message = {
 	id: string;
@@ -28,7 +38,7 @@ type Message = {
 };
 
 function subSse() {
-	const eventSource = new EventSource(BACK_URL + "/api/events");
+	const eventSource = new EventSource(BACK_URL + "/api/events", { withCredentials: true });
 
 	eventSource.onmessage = async (e) => {
 		try {
@@ -87,17 +97,25 @@ where updated_at > ?;
 		method: "POST",
 		body: JSON.stringify(updated),
 		headers: { "Content-Type": "application/json" },
+		credentials: "include",
 	});
 	if (!res.ok) return;
 	localStorage.setItem(LAST_SYNC, new Date().toISOString());
 }
 
 export function Entry() {
-	sync();
-	subSse();
+	createEffect(() => {
+		if (user.value) {
+			sync();
+			subSse();
+		}
+	});
 
 	return (
 		<div class="mx-auto mt-[40vh] max-w-sm space-y-4 p-4">
+			{!user.value && <Register />}
+			{!user.value && <Login />}
+
 			{showUpdate() && (
 				<button
 					onClick={() => {
@@ -468,16 +486,16 @@ function usePromise<TResult>(promise: () => Promise<any>, defaultValue?: TResult
 	});
 
 	function run() {
-		promise().then(
-			(result) => {
+		promise()
+			.then((result) => {
 				setState({ status: "resolved", result });
-			},
-			(error) => setState({ status: "rejected", result: error })
-		);
+			})
+			.catch((error) => {
+				setState({ status: "rejected", result: error });
+			});
 	}
 
 	createEffect(() => {
-		promise();
 		run();
 	});
 
@@ -516,4 +534,168 @@ function usePromise<TResult>(promise: () => Promise<any>, defaultValue?: TResult
 		},
 		{ refetch: run },
 	] as const;
+}
+
+const authFormSchema = v.object({
+	username: v.pipe(v.string(), v.minLength(1, "required")),
+	password: v.pipe(v.string(), v.minLength(1, "required")),
+});
+function Register() {
+	let dialog!: HTMLDialogElement;
+
+	async function onSubmit(e: SubmitEvent) {
+		e.preventDefault();
+		const t = e.currentTarget as HTMLFormElement;
+
+		const data = Object.fromEntries(new FormData(t));
+		if (!v.is(authFormSchema, data)) return;
+
+		const res = await fetch(BACK_URL + "/api/auth/register", {
+			method: "POST",
+			body: JSON.stringify(data),
+			headers: { "Content-Type": "application/json" },
+			credentials: "include",
+		});
+		if (!res.ok) return;
+		refetchUser();
+
+		dialog.close();
+	}
+
+	function onCancel() {
+		dialog.close();
+	}
+
+	return (
+		<>
+			<button
+				class="focus border-gray-a5 h-9 border px-3"
+				onClick={() => {
+					dialog.showModal();
+				}}
+			>
+				register
+			</button>
+
+			<dialog
+				ref={dialog}
+				class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
+			>
+				<h2 class="text-lg font-medium">register</h2>
+
+				<form class="mt-4 space-y-4" onSubmit={onSubmit}>
+					<div class="space-y-1">
+						<label for="username" class="block">
+							username
+						</label>
+						<input
+							type="text"
+							name="username"
+							id="username"
+							class="focus border-gray-a4 h-9 w-full border px-2"
+						/>
+					</div>
+
+					<div class="space-y-1">
+						<label for="password" class="block">
+							password
+						</label>
+						<input
+							type="password"
+							name="password"
+							id="password"
+							class="focus border-gray-a4 h-9 w-full border px-2"
+						/>
+					</div>
+
+					<div class="flex justify-end gap-2">
+						<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
+							cancel
+						</button>
+						<button class="focus bg-gray-a6 h-9 px-3">register</button>
+					</div>
+				</form>
+			</dialog>
+		</>
+	);
+}
+
+function Login() {
+	let dialog!: HTMLDialogElement;
+
+	async function onSubmit(e: SubmitEvent) {
+		e.preventDefault();
+
+		const t = e.currentTarget as HTMLFormElement;
+
+		const data = Object.fromEntries(new FormData(t));
+		if (!v.is(authFormSchema, data)) return;
+
+		const res = await fetch(BACK_URL + "/api/auth/login", {
+			method: "POST",
+			body: JSON.stringify(data),
+			headers: { "Content-Type": "application/json" },
+			credentials: "include",
+		});
+		if (!res.ok) return;
+		refetchUser();
+		dialog.close();
+	}
+
+	function onCancel() {
+		dialog.close();
+	}
+
+	return (
+		<>
+			<button
+				class="focus border-gray-a5 h-9 border px-3"
+				onClick={() => {
+					dialog.showModal();
+				}}
+			>
+				login
+			</button>
+
+			<dialog
+				ref={dialog}
+				class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
+			>
+				<h2 class="text-lg font-medium">login</h2>
+
+				<form class="mt-4 space-y-4" onSubmit={onSubmit}>
+					<div class="space-y-1">
+						<label for="username" class="block">
+							username
+						</label>
+						<input
+							type="text"
+							name="username"
+							id="username"
+							class="focus border-gray-a4 h-9 w-full border px-2"
+						/>
+					</div>
+
+					<div class="space-y-1">
+						<label for="password" class="block">
+							password
+						</label>
+						<input
+							type="password"
+							name="password"
+							id="password"
+							class="focus border-gray-a4 h-9 w-full border px-2"
+						/>
+					</div>
+
+					<div class="flex justify-end gap-2">
+						<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
+							cancel
+						</button>
+						<button class="focus bg-gray-a6 h-9 px-3">login</button>
+					</div>
+				</form>
+			</dialog>
+		</>
+	);
 }

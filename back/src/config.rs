@@ -6,6 +6,8 @@ use once_cell::sync::Lazy;
 pub struct Config {
     pub database_url: String,
     pub front_url: String,
+    pub secret: String,
+    pub is_prod: bool,
 }
 
 impl Config {
