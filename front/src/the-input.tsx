@@ -4,6 +4,40 @@ import { createStore } from "solid-js/store";
 
 import { Bookmark } from "./db";
 
+export function normalizeUrl(url: string) {
+	if (!(url.includes("http://") || url.includes("https://"))) {
+		return "https://" + url;
+	}
+	return url;
+}
+
+function addPreloadLinks(url: string) {
+	const normalizedUrl = normalizeUrl(url);
+	try {
+		const urlObj = new URL(normalizedUrl);
+
+		document
+			.querySelectorAll(
+				'link[rel="preconnect"], link[rel="dns-prefetch"], link[rel="prefetch"], link[rel="preload"]'
+			)
+			.forEach((link) => link.remove());
+
+		const dnsPrefetch = document.createElement("link");
+		dnsPrefetch.rel = "dns-prefetch";
+		dnsPrefetch.href = urlObj.origin;
+		dnsPrefetch.crossOrigin = "anonymous";
+		document.head.appendChild(dnsPrefetch);
+
+		const preconnect = document.createElement("link");
+		preconnect.rel = "preconnect";
+		preconnect.crossOrigin = "anonymous";
+		preconnect.href = urlObj.origin;
+		document.head.appendChild(preconnect);
+	} catch (e) {
+		console.warn("Invalid URL for preloading:", url);
+	}
+}
+
 export function TheInput(props: {
 	items: Array<Bookmark> | null;
 	onInput: (value: string) => any;
@@ -11,6 +45,7 @@ export function TheInput(props: {
 	onCreate: (value: string) => any;
 	onEdit: (value: string) => any;
 	onDelete: (id: string, forced: boolean) => any;
+	onSettings: () => any;
 }) {
 	let input: HTMLInputElement = null as any;
 	let results: HTMLUListElement = null as any;
@@ -25,6 +60,7 @@ export function TheInput(props: {
 	});
 
 	const isCreateVisible = () => state.value.length && !props.items?.length;
+	const isSettingsVisible = () => state.value.startsWith("_s");
 
 	function moveFocus(dir: number) {
 		const focused = results.querySelector("[data-focused=true]");
@@ -57,6 +93,14 @@ export function TheInput(props: {
 			behavior: "instant",
 			block: "nearest",
 		});
+
+		// Preload URL when item gets focused
+		if (nextFocusedId !== "__create__") {
+			const focusedItem = props.items?.find((i) => i.id === nextFocusedId);
+			if (focusedItem) {
+				addPreloadLinks(focusedItem.url);
+			}
+		}
 	}
 
 	function moveFocusToFirst() {
@@ -73,6 +117,14 @@ export function TheInput(props: {
 				behavior: "instant",
 				block: "nearest",
 			});
+
+			// Preload URL when first item gets focused
+			if (nextFocusedId !== "__create__") {
+				const focusedItem = props.items?.find((i) => i.id === nextFocusedId);
+				if (focusedItem) {
+					addPreloadLinks(focusedItem.url);
+				}
+			}
 		}
 	}
 
@@ -152,10 +204,16 @@ export function TheInput(props: {
 					} else if (e.key === "Enter") {
 						e.preventDefault();
 
+						if (isSettingsVisible() || focusedId === "__settings__") {
+							props.onSettings();
+							return;
+						}
+
 						if (isCreateVisible() || focusedId === "__create__" || e.metaKey) {
 							props.onCreate(state.value);
 							return;
 						}
+
 						if (!focusedId) return;
 						if (e.shiftKey) {
 							props.onEdit(focusedId);
@@ -180,6 +238,11 @@ export function TheInput(props: {
 					"min-width": state.resultsWidth + "px",
 				}}
 			>
+				{isSettingsVisible() && (
+					<li data-id="__settings__" class="data-focused:bg-gray-a5 px-2 py-1">
+						settings
+					</li>
+				)}
 				{props.items?.length
 					? props.items?.map((i) => (
 							<li data-id={i.id} class="data-focused:bg-gray-a5 px-2 py-1">

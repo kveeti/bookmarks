@@ -1,15 +1,20 @@
 import { batch, createEffect, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
-import * as v from "valibot";
 import { registerSW } from "virtual:pwa-register";
 
-import { Bookmark, DbReset, db, id } from "./db";
-import { TheInput } from "./the-input";
+import { Auth } from "./auth";
+import { Bookmark, DbExport, DbImport, DbReset, DbSeed, db, deleteBookmark } from "./db";
+import { DeleteBookmark } from "./delete-bookmark";
+import { EditBookmark } from "./edit-bookmark";
+import { NewBookmark } from "./new-bookmark";
+import { Settings } from "./settings";
+import { TheInput, normalizeUrl } from "./the-input";
 
 const BACK_URL = import.meta.env.VITE_BACK_URL;
+let refetchBookmarks: (() => void) | null = null;
 
 const [showUpdate, setShowUpdate] = createSignal(false);
-const [user, { refetch: refetchUser }] = usePromise<{ id: string; username: string } | null>(
+export const [user, { refetch: refetchUser }] = usePromise<{ id: string; username: string } | null>(
 	async () => {
 		const res = await fetch(BACK_URL + "/api/me", {
 			method: "GET",
@@ -29,26 +34,28 @@ const updateSW = registerSW({
 
 type Message = {
 	id: string;
-	client_id: string;
 	title: string;
 	url: string;
 	deleted_at: string;
 	updated_at: string;
-	created_at: string;
 };
+function getSyncEnabled() {
+	return localStorage.getItem(SYNC_ENABLED) === "true";
+}
 
 function subSse() {
+	if (!getSyncEnabled()) return;
+
 	const eventSource = new EventSource(BACK_URL + "/api/events", { withCredentials: true });
 
 	eventSource.onmessage = async (e) => {
 		try {
-			const parsedData = JSON.parse(e.data) as Message;
-			console.log("new msg!", parsedData);
+			const bookmark = JSON.parse(e.data) as Message;
 
 			await db.exec(
 				`
-insert into bookmarks (id, client_id, title, url, deleted_at, updated_at, created_at)
-values (?, ?, ?, ?, ?, ?, ?)
+insert into bookmarks (id, title, url, deleted_at, updated_at)
+values (?, ?, ?, ?, ?)
 on conflict(id)
 do update set
 	title = ?,
@@ -57,19 +64,19 @@ do update set
 	updated_at = ?;
 `,
 				[
-					parsedData.id,
-					parsedData.client_id,
-					parsedData.title,
-					parsedData.url,
-					parsedData.deleted_at,
-					parsedData.updated_at,
-					parsedData.created_at,
-					parsedData.title,
-					parsedData.url,
-					parsedData.deleted_at,
-					parsedData.updated_at,
+					bookmark.id,
+					bookmark.title,
+					bookmark.url,
+					bookmark.deleted_at,
+					bookmark.updated_at,
+					bookmark.title,
+					bookmark.url,
+					bookmark.deleted_at,
+					bookmark.updated_at,
 				]
 			);
+
+			refetchBookmarks?.();
 		} catch (error) {
 			console.error("invalid sse data", error);
 		}
@@ -77,45 +84,147 @@ do update set
 }
 
 const LAST_SYNC = "last_sync";
+const SYNC_ENABLED = "sync_enabled";
+const CHUNK_SIZE = 500;
+
+async function init() {
+	if (!getSyncEnabled()) return;
+
+	const lastSyncedAt = localStorage.getItem(LAST_SYNC) || "1970-01-01T00:00:00.000Z";
+	const syncStartedAt = new Date().toISOString();
+
+	const localCount = await db.query("SELECT COUNT(*) as count FROM bookmarks limit 1;");
+	const wasEmpty = localCount[0].count === 0;
+
+	let serverCursor = null;
+	while (true) {
+		const response = await fetch(
+			BACK_URL +
+				`/api/bootstrap?cursor=${serverCursor || ""}&limit=${CHUNK_SIZE}&from=${lastSyncedAt}`,
+			{ credentials: "include" }
+		);
+
+		if (!response.ok) throw new Error("Bootstrap failed");
+
+		const { bookmarks, next_cursor } = await response.json();
+
+		if (bookmarks.length > 0) {
+			const values = [];
+			const params = [];
+
+			for (const bookmark of bookmarks) {
+				values.push("(?, ?, ?, ?, ?)");
+				params.push(
+					bookmark.id,
+					bookmark.title,
+					bookmark.url,
+					bookmark.deleted_at,
+					bookmark.updated_at
+				);
+			}
+
+			await db.exec(
+				`INSERT INTO bookmarks (id, title, url, deleted_at, updated_at)
+					 VALUES ${values.join(",")}
+					 ON CONFLICT(id) DO UPDATE SET
+					   title = excluded.title,
+					   url = excluded.url,
+					   deleted_at = excluded.deleted_at,
+					   updated_at = excluded.updated_at`,
+				params
+			);
+		}
+
+		if (!next_cursor) break;
+		serverCursor = next_cursor;
+	}
+
+	if (wasEmpty) return;
+
+	let hasMore = true;
+	let clientCursor = null;
+
+	while (hasMore) {
+		const localChanges = await db.query(
+			`SELECT * FROM bookmarks 
+					 WHERE updated_at > ? 
+					 AND updated_at <= ?
+					 AND (? IS NULL OR id > ?)
+					 ORDER BY updated_at, id
+					 LIMIT ?`,
+			[lastSyncedAt, syncStartedAt, clientCursor, clientCursor, CHUNK_SIZE]
+		);
+
+		hasMore = localChanges.length === CHUNK_SIZE;
+		if (hasMore) {
+			clientCursor = localChanges[localChanges.length - 1].id;
+		}
+
+		if (localChanges.length > 0) {
+			const response = await fetch(BACK_URL + "/api/sync", {
+				method: "POST",
+				body: JSON.stringify({
+					bookmarks: localChanges,
+				}),
+				headers: { "Content-Type": "application/json" },
+				credentials: "include",
+			});
+
+			if (!response.ok) throw new Error("Sync failed");
+		}
+	}
+	localStorage.setItem(LAST_SYNC, syncStartedAt);
+}
 
 async function sync() {
-	let lastSyncedAt = localStorage.getItem(LAST_SYNC) || 0;
-	lastSyncedAt = new Date(lastSyncedAt);
-	console.log({ lastSyncedAt });
+	if (!getSyncEnabled()) return;
 
-	const updated = await db.query(
-		`
-select * from bookmarks
-where updated_at > ?;
-`,
-		[lastSyncedAt.toISOString()]
-	);
+	const lastSyncedAt = localStorage.getItem(LAST_SYNC) || "1970-01-01T00:00:00.000Z";
 
-	if (!updated.length) return;
+	let hasMore = true;
+	let clientCursor = null;
 
-	const res = await fetch(BACK_URL + "/api/sync", {
-		method: "POST",
-		body: JSON.stringify(updated),
-		headers: { "Content-Type": "application/json" },
-		credentials: "include",
-	});
-	if (!res.ok) return;
+	while (hasMore) {
+		const localChanges = await db.query(
+			`SELECT * FROM bookmarks 
+					 WHERE updated_at > ? 
+					 AND (? IS NULL OR id > ?)
+					 ORDER BY updated_at, id
+					 LIMIT ?`,
+			[lastSyncedAt, clientCursor, clientCursor, CHUNK_SIZE]
+		);
+
+		hasMore = localChanges.length === CHUNK_SIZE;
+		if (hasMore) {
+			clientCursor = localChanges[localChanges.length - 1].id;
+		}
+
+		if (localChanges.length > 0) {
+			const response = await fetch(BACK_URL + "/api/sync", {
+				method: "POST",
+				body: JSON.stringify({
+					bookmarks: localChanges,
+				}),
+				headers: { "Content-Type": "application/json" },
+				credentials: "include",
+			});
+
+			if (!response.ok) throw new Error("Sync failed");
+		}
+	}
 	localStorage.setItem(LAST_SYNC, new Date().toISOString());
 }
 
 export function Entry() {
 	createEffect(() => {
 		if (user.value) {
-			sync();
+			init();
 			subSse();
 		}
 	});
 
 	return (
 		<div class="mx-auto mt-[40vh] max-w-sm space-y-4 p-4">
-			{!user.value && <Register />}
-			{!user.value && <Login />}
-
 			{showUpdate() && (
 				<button
 					onClick={() => {
@@ -129,21 +238,23 @@ export function Entry() {
 
 			<Input />
 
-			{import.meta.env.DEV && <DbReset />}
+			{import.meta.env.DEV && (
+				<div class="flex flex-wrap gap-2">
+					<DbReset />
+					<DbSeed />
+					<DbExport />
+					<DbImport />
+					<Auth />
+				</div>
+			)}
 		</div>
 	);
-}
-
-async function deleteBookmark(id: string) {
-	await db.exec("update bookmarks set deleted_at = ? where id = ?", [
-		new Date().toISOString(),
-		id,
-	]);
 }
 
 function Input() {
 	const [inputVal, setInputVal] = createSignal("");
 	const [isNewBookmarkOpen, setIsNewBookmarkOpen] = createSignal(false);
+	const [isSettingsOpen, setIsSettingsOpen] = createSignal(false);
 	const [state, setState] = createStore<
 		| {
 				intent: "delete" | "edit";
@@ -157,11 +268,12 @@ function Input() {
 
 	const [s, { refetch }] = usePromise<Array<Bookmark>>(
 		() =>
-			db.query("select * from bookmarks where title like ? limit 50", [
+			db.query("select * from bookmarks where title like ? and deleted_at is null limit 10", [
 				"%" + inputVal() + "%",
 			]),
 		[]
 	);
+	refetchBookmarks = refetch;
 
 	function onCreate() {
 		setIsNewBookmarkOpen(true);
@@ -180,7 +292,7 @@ function Input() {
 		const item = s.value?.find((i) => i.id === id);
 		if (!item) throw new Error("no item? - id: " + id);
 
-		navigate(item.url);
+		window.location.href = normalizeUrl(item.url);
 	}
 
 	async function onDelete(id: string, forced = false) {
@@ -189,7 +301,7 @@ function Input() {
 
 		if (forced) {
 			await deleteBookmark(item.id);
-			refetch();
+			sync();
 			return;
 		}
 
@@ -202,6 +314,9 @@ function Input() {
 	return (
 		<>
 			<TheInput
+				onSettings={() => {
+					setIsSettingsOpen(true);
+				}}
 				onCreate={onCreate}
 				onSelect={onSelect}
 				onInput={setInputVal}
@@ -210,13 +325,14 @@ function Input() {
 				items={s.value}
 			/>
 
+			<Settings isOpen={isSettingsOpen()} onOpenChange={setIsSettingsOpen} />
+
 			<NewBookmark
 				initialValue={inputVal()}
 				isOpen={isNewBookmarkOpen()}
 				onOpenChange={(value) => setIsNewBookmarkOpen(value)}
 				onSuccess={() => {
 					sync();
-					refetch();
 				}}
 			/>
 
@@ -225,7 +341,6 @@ function Input() {
 				onOpenChange={() => setState({})}
 				onSuccess={() => {
 					sync();
-					refetch();
 				}}
 			/>
 
@@ -234,246 +349,10 @@ function Input() {
 				onOpenChange={() => setState({})}
 				onSuccess={() => {
 					sync();
-					refetch();
 				}}
 			/>
 		</>
 	);
-}
-
-const formSchema = v.object({
-	title: v.pipe(v.string(), v.minLength(1, "required")),
-	url: v.pipe(v.string(), v.minLength(1, "required")),
-});
-function NewBookmark(props: {
-	initialValue?: string;
-	isOpen: boolean;
-	onOpenChange: (isOpen: boolean) => any;
-	onSuccess: () => void;
-}) {
-	let dialog!: HTMLDialogElement;
-
-	function onClose() {
-		props.onOpenChange(false);
-	}
-	createEffect(() => {
-		if (props.isOpen) {
-			dialog.showModal();
-		}
-
-		dialog.addEventListener("close", onClose);
-		return () => dialog.removeEventListener("close", onClose);
-	});
-
-	async function onSubmit(e: SubmitEvent) {
-		e.preventDefault();
-		const t = e.currentTarget as HTMLFormElement;
-
-		const data = Object.fromEntries(new FormData(t));
-		if (!v.is(formSchema, data)) return;
-
-		const now = new Date().toISOString();
-		await db.exec(
-			"insert into bookmarks (id, client_id, title, url, created_at, updated_at) values (?, ?, ?, ?, ?, ?)",
-			[id(), id(), data.title, data.url, now, now]
-		);
-		t.reset();
-		props.onSuccess();
-		dialog.close();
-	}
-
-	function onCancel() {
-		dialog.close();
-	}
-
-	return (
-		<dialog
-			ref={dialog}
-			class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
-		>
-			<h2 class="text-lg font-medium">new bookmark</h2>
-
-			<form class="mt-4 space-y-4" onSubmit={onSubmit}>
-				<div class="space-y-1">
-					<label for="title" class="block">
-						title
-					</label>
-					<input
-						type="text"
-						name="title"
-						id="title"
-						value={props.initialValue}
-						class="focus border-gray-a4 h-9 w-full border px-2"
-					/>
-				</div>
-
-				<div class="space-y-1">
-					<label for="url" class="block">
-						url
-					</label>
-					<input
-						type="text"
-						name="url"
-						id="url"
-						class="focus border-gray-a4 h-9 w-full border px-2"
-					/>
-				</div>
-
-				<div class="flex justify-end gap-2">
-					<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
-						cancel
-					</button>
-					<button class="focus bg-gray-a6 h-9 px-3">add</button>
-				</div>
-			</form>
-		</dialog>
-	);
-}
-
-function DeleteBookmark(props: {
-	bookmark: Bookmark | null;
-	onOpenChange: (isOpen: boolean) => any;
-	onSuccess: () => any;
-}) {
-	let dialog!: HTMLDialogElement;
-
-	function onClose() {
-		props.onOpenChange(false);
-	}
-	createEffect(() => {
-		if (props.bookmark) {
-			dialog.showModal();
-		}
-
-		dialog.addEventListener("close", onClose);
-		return () => dialog.removeEventListener("close", onClose);
-	});
-
-	async function onConfirm() {
-		if (!props.bookmark?.id) return;
-		await deleteBookmark(props.bookmark.id);
-		props.onSuccess();
-		dialog.close();
-	}
-
-	function onCancel() {
-		dialog.close();
-	}
-
-	return (
-		<dialog
-			ref={dialog}
-			class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
-		>
-			<h2 class="mb-3 text-lg font-medium">delete bookmark</h2>
-
-			<p class="mb-5">delete "{props.bookmark?.title}"?</p>
-
-			<div class="flex justify-end gap-2">
-				<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
-					cancel
-				</button>
-				<button class="focus bg-red-a6 h-9 px-3" onClick={onConfirm}>
-					yes, delete
-				</button>
-			</div>
-		</dialog>
-	);
-}
-
-function EditBookmark(props: {
-	bookmark: Bookmark | null;
-	onOpenChange: (isOpen: boolean) => any;
-	onSuccess: () => any;
-}) {
-	let dialog!: HTMLDialogElement;
-
-	function onClose() {
-		props.onOpenChange(false);
-	}
-	createEffect(() => {
-		if (props.bookmark) {
-			dialog.showModal();
-		}
-
-		dialog.addEventListener("close", onClose);
-		return () => dialog.removeEventListener("close", onClose);
-	});
-
-	async function onSubmit(e: SubmitEvent) {
-		e.preventDefault();
-		if (!props.bookmark?.id) return;
-		const t = e.currentTarget as HTMLFormElement;
-
-		const data = Object.fromEntries(new FormData(t));
-		if (!v.is(formSchema, data)) return;
-
-		await db.exec("update bookmarks set title = ?, url = ? where id = ?", [
-			data.title,
-			data.url,
-			props.bookmark.id,
-		]);
-		t.reset();
-		props.onSuccess();
-		dialog.close();
-	}
-
-	function onCancel() {
-		dialog.close();
-	}
-
-	return (
-		<dialog
-			ref={dialog}
-			class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
-		>
-			<h2 class="text-lg font-medium">edit bookmark</h2>
-
-			<form class="mt-4 space-y-4" onSubmit={onSubmit}>
-				<div class="space-y-1">
-					<label for="title" class="block">
-						title
-					</label>
-					<input
-						type="text"
-						name="title"
-						id="title"
-						value={props.bookmark?.title}
-						class="focus border-gray-a4 h-9 w-full border px-2"
-					/>
-				</div>
-
-				<div class="space-y-1">
-					<label for="url" class="block">
-						url
-					</label>
-					<input
-						type="text"
-						name="url"
-						id="url"
-						value={props.bookmark?.url}
-						class="focus border-gray-a4 h-9 w-full border px-2"
-					/>
-				</div>
-
-				<div class="flex justify-end gap-2">
-					<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
-						cancel
-					</button>
-					<button class="focus bg-gray-a6 h-9 px-3">add</button>
-				</div>
-			</form>
-		</dialog>
-	);
-}
-
-function navigate(url: string) {
-	let goodUrl = url;
-	if (!(goodUrl.includes("http://") || goodUrl.includes("https://"))) {
-		goodUrl = "https://" + url;
-	}
-
-	window.location.href = goodUrl;
 }
 
 function usePromise<TResult>(promise: () => Promise<any>, defaultValue?: TResult) {
@@ -534,168 +413,4 @@ function usePromise<TResult>(promise: () => Promise<any>, defaultValue?: TResult
 		},
 		{ refetch: run },
 	] as const;
-}
-
-const authFormSchema = v.object({
-	username: v.pipe(v.string(), v.minLength(1, "required")),
-	password: v.pipe(v.string(), v.minLength(1, "required")),
-});
-function Register() {
-	let dialog!: HTMLDialogElement;
-
-	async function onSubmit(e: SubmitEvent) {
-		e.preventDefault();
-		const t = e.currentTarget as HTMLFormElement;
-
-		const data = Object.fromEntries(new FormData(t));
-		if (!v.is(authFormSchema, data)) return;
-
-		const res = await fetch(BACK_URL + "/api/auth/register", {
-			method: "POST",
-			body: JSON.stringify(data),
-			headers: { "Content-Type": "application/json" },
-			credentials: "include",
-		});
-		if (!res.ok) return;
-		refetchUser();
-
-		dialog.close();
-	}
-
-	function onCancel() {
-		dialog.close();
-	}
-
-	return (
-		<>
-			<button
-				class="focus border-gray-a5 h-9 border px-3"
-				onClick={() => {
-					dialog.showModal();
-				}}
-			>
-				register
-			</button>
-
-			<dialog
-				ref={dialog}
-				class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
-			>
-				<h2 class="text-lg font-medium">register</h2>
-
-				<form class="mt-4 space-y-4" onSubmit={onSubmit}>
-					<div class="space-y-1">
-						<label for="username" class="block">
-							username
-						</label>
-						<input
-							type="text"
-							name="username"
-							id="username"
-							class="focus border-gray-a4 h-9 w-full border px-2"
-						/>
-					</div>
-
-					<div class="space-y-1">
-						<label for="password" class="block">
-							password
-						</label>
-						<input
-							type="password"
-							name="password"
-							id="password"
-							class="focus border-gray-a4 h-9 w-full border px-2"
-						/>
-					</div>
-
-					<div class="flex justify-end gap-2">
-						<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
-							cancel
-						</button>
-						<button class="focus bg-gray-a6 h-9 px-3">register</button>
-					</div>
-				</form>
-			</dialog>
-		</>
-	);
-}
-
-function Login() {
-	let dialog!: HTMLDialogElement;
-
-	async function onSubmit(e: SubmitEvent) {
-		e.preventDefault();
-
-		const t = e.currentTarget as HTMLFormElement;
-
-		const data = Object.fromEntries(new FormData(t));
-		if (!v.is(authFormSchema, data)) return;
-
-		const res = await fetch(BACK_URL + "/api/auth/login", {
-			method: "POST",
-			body: JSON.stringify(data),
-			headers: { "Content-Type": "application/json" },
-			credentials: "include",
-		});
-		if (!res.ok) return;
-		refetchUser();
-		dialog.close();
-	}
-
-	function onCancel() {
-		dialog.close();
-	}
-
-	return (
-		<>
-			<button
-				class="focus border-gray-a5 h-9 border px-3"
-				onClick={() => {
-					dialog.showModal();
-				}}
-			>
-				login
-			</button>
-
-			<dialog
-				ref={dialog}
-				class="bg-gray-1 text-gray-12 border-gray-a5 m-auto min-w-[350px] border p-4 backdrop:backdrop-blur-xs"
-			>
-				<h2 class="text-lg font-medium">login</h2>
-
-				<form class="mt-4 space-y-4" onSubmit={onSubmit}>
-					<div class="space-y-1">
-						<label for="username" class="block">
-							username
-						</label>
-						<input
-							type="text"
-							name="username"
-							id="username"
-							class="focus border-gray-a4 h-9 w-full border px-2"
-						/>
-					</div>
-
-					<div class="space-y-1">
-						<label for="password" class="block">
-							password
-						</label>
-						<input
-							type="password"
-							name="password"
-							id="password"
-							class="focus border-gray-a4 h-9 w-full border px-2"
-						/>
-					</div>
-
-					<div class="flex justify-end gap-2">
-						<button class="focus border-gray-a5 h-9 border px-3" onClick={onCancel}>
-							cancel
-						</button>
-						<button class="focus bg-gray-a6 h-9 px-3">login</button>
-					</div>
-				</form>
-			</dialog>
-		</>
-	);
 }

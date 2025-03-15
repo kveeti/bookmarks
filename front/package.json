@@ -7,6 +7,7 @@
 		"depl": "bun run build && wrangler pages deploy ./dist"
 	},
 	"dependencies": {
+		"@faker-js/faker": "^9.6.0",
 		"@floating-ui/dom": "^1.6.13",
 		"@sqlite.org/sqlite-wasm": "^3.49.1-build2",
 		"solid-js": "^1.9.5",

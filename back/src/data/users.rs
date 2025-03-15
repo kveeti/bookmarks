@@ -52,19 +52,6 @@ impl Users {
 
         query!(
             r#"
-            insert into sessions (id, user_id, expiry)
-            values ($1, $2, $3);
-            "#,
-            session.id,
-            session.user_id,
-            session.expiry,
-        )
-        .execute(&mut *tx)
-        .await
-        .context("error inserting session")?;
-
-        query!(
-            r#"
             insert into users (id, username, password_hash)
             values ($1, $2, $3);
             "#,
@@ -75,6 +62,19 @@ impl Users {
         .execute(&mut *tx)
         .await
         .context("error inserting user")?;
+
+        query!(
+            r#"
+            insert into sessions (id, user_id, expiry)
+            values ($1, $2, $3);
+            "#,
+            session.id,
+            session.user_id,
+            session.expiry,
+        )
+        .execute(&mut *tx)
+        .await
+        .context("error inserting session")?;
 
         tx.commit().await.context("error committing transaction")?;
 
