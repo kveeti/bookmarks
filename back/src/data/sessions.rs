@@ -1,8 +1,5 @@
-use anyhow::Context;
 use chrono::{DateTime, Utc};
-use sqlx::{query, query_as, PgPool};
-
-use crate::data::users::User;
+use sqlx::{query_as, PgPool};
 
 #[derive(Clone)]
 pub struct Sessions {
@@ -42,6 +39,21 @@ impl Sessions {
             session.id,
             session.user_id,
             session.expiry,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        return Ok(());
+    }
+
+    pub async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+        query_as!(
+            Session,
+            r#"
+            delete from sessions where id = $1 and user_id = $2;
+            "#,
+            session_id,
+            user_id
         )
         .execute(&self.pool)
         .await?;

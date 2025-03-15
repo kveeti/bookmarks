@@ -1,9 +1,12 @@
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use auth::{create_session_cookie, create_token, password_hash, password_verify, UserId};
+use auth::{
+    create_empty_session_cookie, create_session_cookie, create_token, password_hash,
+    password_verify, Auth, UserId,
+};
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Query, State},
     http::HeaderValue,
     response::{
         sse::{Event, KeepAlive},
@@ -12,7 +15,7 @@ use axum::{
     routing::{get, post},
     Extension, Router,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use config::CONFIG;
 use data::{Bookmark, Data, Session, User};
 use error::ApiError;
@@ -47,9 +50,11 @@ async fn main() {
     let routes = Router::new()
         .route("/events", get(sse_handler))
         .route("/sync", post(sync_handler))
+        .route("/bootstrap", get(bootstrap_handler))
         .route("/me", get(me_handler))
         .route("/auth/login", post(login_handler))
-        .route("/auth/register", post(register_handler));
+        .route("/auth/register", post(register_handler))
+        .route("/auth/logout", post(logout_handler));
 
     let api = Router::new()
         .nest("/api", routes)
@@ -108,7 +113,7 @@ async fn sse_handler(
                 return None;
             }
 
-            match serde_json::to_string(&message) {
+            match serde_json::to_string(&message.bookmark) {
                 Ok(data) => Some(Ok(Event::default().data(data))),
                 Err(_) => None,
             }
@@ -120,29 +125,68 @@ async fn sse_handler(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SyncRequest {
+    bookmarks: Vec<Bookmark>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BootstrapRequest {
+    cursor: Option<String>,
+    limit: Option<i64>,
+    from: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BootstrapResponse {
+    bookmarks: Vec<Bookmark>,
+    next_cursor: Option<String>,
+}
+
+async fn bootstrap_handler(
+    data: State<Data>,
+    UserId(user_id): UserId,
+    Query(req): Query<BootstrapRequest>,
+) -> Result<Json<BootstrapResponse>, ApiError> {
+    let limit = req.limit.unwrap_or(100);
+
+    let bookmarks = data
+        .bookmarks
+        .get_all(&user_id, &req.from, req.cursor.as_deref(), limit)
+        .await
+        .context("error getting bookmarks")?;
+
+    let next_cursor = if bookmarks.len() == limit as usize {
+        bookmarks.last().map(|b| b.id.clone())
+    } else {
+        None
+    };
+
+    Ok(Json(BootstrapResponse {
+        bookmarks,
+        next_cursor,
+    }))
+}
+
 async fn sync_handler(
     Extension(tx): Extension<Arc<Tx>>,
     data: State<Data>,
     UserId(user_id): UserId,
-    Json(bookmarks): Json<Vec<Bookmark>>,
-) -> Result<&'static str, ApiError> {
-    if bookmarks.is_empty() {
-        return Ok("ok");
-    }
+    Json(req): Json<SyncRequest>,
+) -> Result<(), ApiError> {
+    data.bookmarks
+        .bulk_upsert(&user_id, &req.bookmarks)
+        .await
+        .context("error upserting bookmarks")?;
 
-    for bookmark in bookmarks.iter() {
+    for bookmark in req.bookmarks {
         let _ = tx.send(Message {
             user_id: user_id.to_owned(),
-            bookmark: bookmark.clone(),
+            bookmark,
         });
-
-        data.bookmarks
-            .upsert(&user_id, bookmark)
-            .await
-            .context("error upserting bookmark")?;
     }
 
-    Ok("ok")
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -255,4 +299,21 @@ async fn me_handler(
         "id": user.id,
         "username": user.username,
     })))
+}
+
+async fn logout_handler(
+    data: State<Data>,
+    Auth(auth): Auth,
+) -> Result<impl IntoResponse, ApiError> {
+    data.sessions
+        .delete(&auth.user_id, &auth.session_id)
+        .await
+        .context("error deleting session")?;
+
+    Ok(AppendHeaders([(
+        header::SET_COOKIE,
+        create_empty_session_cookie()
+            .parse::<HeaderValue>()
+            .context("error parsing cookie")?,
+    )]))
 }

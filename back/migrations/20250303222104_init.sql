@@ -6,10 +6,8 @@ create table users (
 
 create table bookmarks (
     id varchar(30) primary key not null,
-    client_id varchar(30) not null,
     title varchar(100) not null,
     url varchar(255) not null,
-    created_at timestamptz not null default now(),
     updated_at timestamptz not null,
     deleted_at timestamptz,
 
