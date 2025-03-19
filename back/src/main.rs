@@ -206,15 +206,30 @@ async fn login_handler(
         .context("error getting user by username")?;
 
     let user = match user {
-        Some(user) => user,
+        Some(user) => {
+            if !password_verify(&input.password, &user.password_hash).await? {
+                return Err(ApiError::Unauthorized("invalid creds".to_owned()))?;
+            }
+
+            user
+        }
         None => {
-            return Err(ApiError::Unauthorized("invalid creds".to_owned()))?;
+            let user = User {
+                id: new_id(),
+                password_hash: password_hash(&input.password)
+                    .await
+                    .context("error hashing password")?,
+                username: input.username,
+            };
+
+            data.users
+                .insert(&user)
+                .await
+                .context("error inserting user")?;
+
+            user
         }
     };
-
-    if !password_verify(&input.password, &user.password_hash).await? {
-        return Err(ApiError::Unauthorized("invalid creds".to_owned()))?;
-    }
 
     let session_expiry = Utc::now() + Duration::from_secs(60 * 60 * 24 * 30);
     let session = &Session {
