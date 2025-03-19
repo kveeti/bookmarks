@@ -3,6 +3,7 @@ import * as v from "valibot";
 
 import { Auth } from "./auth";
 import { DbExport, DbImport, DbReset } from "./db";
+import { ToggleSyncEnabled } from "./entry";
 
 export const formSchema = v.object({
 	title: v.pipe(v.string(), v.minLength(1, "required")),
@@ -35,6 +36,7 @@ export function Settings(props: { isOpen: boolean; onOpenChange: (isOpen: boolea
 			<DbExport />
 			<DbReset />
 			<Auth />
+			<ToggleSyncEnabled />
 		</dialog>
 	);
 }

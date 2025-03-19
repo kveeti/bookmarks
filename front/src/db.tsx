@@ -175,7 +175,7 @@ export function DbExport() {
 			onClick={async () => {
 				try {
 					const root = await navigator.storage.getDirectory();
-					const dbFile = await root.getFileHandle("data.sqlite3");
+					const dbFile = await root.getFileHandle("db");
 					const file = await dbFile.getFile();
 
 					const blob = new Blob([await file.arrayBuffer()], {
@@ -217,7 +217,7 @@ export function DbImport() {
 						const root = await navigator.storage.getDirectory();
 						const existingDb = await root.getFileHandle("db");
 						if (existingDb) {
-							await existingDb.remove();
+							await root.removeEntry("db");
 						}
 						const newDb = await root.getFileHandle("db", { create: true });
 						const writable = await newDb.createWritable();
@@ -245,7 +245,7 @@ export function DbReset() {
 			class="focus border-gray-a5 h-9 border px-3"
 			onClick={async () => {
 				if (confirm("reset db?")) {
-					await (await navigator.storage.getDirectory()).remove({ recursive: true });
+					await (await navigator.storage.getDirectory()).removeEntry("db");
 
 					console.log("db reset");
 

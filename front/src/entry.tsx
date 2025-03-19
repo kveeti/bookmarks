@@ -355,6 +355,27 @@ function Input() {
 	);
 }
 
+export function ToggleSyncEnabled() {
+	const [toggleState, setToggleState] = createSignal(getSyncEnabled());
+
+	function onClick() {
+		const newState = !toggleState();
+		setToggleState(newState);
+		localStorage.setItem(SYNC_ENABLED, String(newState));
+
+		if (newState && user.value) {
+			init();
+			sync();
+		}
+	}
+
+	return (
+		<button class="focus border-gray-a5 h-9 border px-3" onClick={onClick}>
+			{toggleState() ? "disable sync" : "enable sync"}
+		</button>
+	);
+}
+
 function usePromise<TResult>(promise: () => Promise<any>, defaultValue?: TResult) {
 	const [state, setState] = createSignal<{
 		status: "pending" | "resolved" | "rejected";
