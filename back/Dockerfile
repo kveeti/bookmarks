@@ -1,4 +1,4 @@
-from rust:1.83-slim as base
+from rust:1.91-slim as base
 workdir /app
 run apt update && apt install -y \
     ca-certificates \
